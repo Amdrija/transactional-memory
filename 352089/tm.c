@@ -23,17 +23,16 @@
 // External headers
 
 // Internal headers
-#include <tm.h>
+#include "tm.h"
 
 #include <stdatomic.h>
 #include <stdlib.h>
-#include <inttypes.h>
+#include <stdint.h>
 #include "macros.h"
 
 struct version_lock
 {
-    atomic_flag write_lock;
-    atomic_flag alloc_lock;
+    atomic_bool write_lock;
     atomic_uint_fast64_t version;
 };
 
@@ -43,12 +42,77 @@ struct segment
     struct segment *next;
     size_t size;
     struct version_lock *locks;
+    atomic_bool alloc_lock;
 };
 
 struct region
 {
+    atomic_uint_fast64_t global_version;
     struct segment *segments;
     size_t align;
+};
+
+struct map_value
+{
+    void *key;
+    void *value;
+    size_t size;
+};
+
+struct map
+{
+    struct map_value *pairs;
+    uint64_t size;
+    uint64_t capacity;
+};
+
+void map_init(struct map *map)
+{
+    map->capacity = 10;
+    map->pairs = (struct map_value *)malloc(sizeof(struct map_value) * map->capacity);
+    map->size = 0;
+}
+
+void map_destroy(struct map *map)
+{
+    free(map->pairs);
+}
+
+void *map_get(struct map *map, void *key, size_t *size)
+{
+    for (uint64_t i = 0; i < map->size; i++)
+    {
+        if (map->pairs[i].key == key)
+        {
+            size = map->pairs[i].size;
+            return map->pairs[i].value;
+        }
+    }
+
+    return NULL;
+}
+
+void map_set(struct map *map, void *key, void *value, size_t size)
+{
+    if (map->size == map->capacity)
+    {
+        map->capacity *= 2;
+        map->pairs = (struct map_value *)realloc(map->pairs, map->capacity);
+    }
+
+    map->pairs[map->size].key = key;
+    map->pairs[map->size].value = value;
+    map->pairs[map->size].size = size;
+    map->size++;
+}
+
+struct transaction
+{
+    uint64_t read_version;
+    uint64_t write_version;
+    struct map read_set;
+    struct map write_set;
+    bool is_read_only;
 };
 
 /** Create (i.e. allocate + init) a new shared memory region, with one first non-free-able allocated segment of the requested size and alignment.
@@ -137,10 +201,16 @@ size_t tm_align(shared_t unused(shared))
  * @param is_ro  Whether the transaction is read-only
  * @return Opaque transaction ID, 'invalid_tx' on failure
  **/
-tx_t tm_begin(shared_t unused(shared), bool unused(is_ro))
+tx_t tm_begin(shared_t shared, bool is_ro)
 {
-    // TODO: tm_begin(shared_t)
-    return invalid_tx;
+    struct region *region = (struct region *)shared;
+    struct transaction *t = (struct transaction *)malloc(sizeof(struct transaction));
+    t->is_read_only = is_ro;
+    map_init(&t->read_set);
+    map_init(&t->write_set);
+    t->read_version = region->global_version;
+
+    return (tx_t)t;
 }
 
 /** [thread-safe] End the given transaction.
@@ -148,9 +218,15 @@ tx_t tm_begin(shared_t unused(shared), bool unused(is_ro))
  * @param tx     Transaction to end
  * @return Whether the whole transaction committed
  **/
-bool tm_end(shared_t unused(shared), tx_t unused(tx))
+bool tm_end(shared_t unused(shared), tx_t tx)
 {
+    struct transaction *t = (struct transaction *)tx;
     // TODO: tm_end(shared_t, tx_t)
+    // Implement execution of transaction
+    map_destroy(&t->read_set);
+    map_destroy(&t->write_set);
+    free(t);
+
     return false;
 }
 
@@ -162,10 +238,38 @@ bool tm_end(shared_t unused(shared), tx_t unused(tx))
  * @param target Target start address (in a private region)
  * @return Whether the whole transaction can continue
  **/
-bool tm_read(shared_t unused(shared), tx_t unused(tx), void const *unused(source), size_t unused(size), void *unused(target))
+bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size, void *target)
 {
-    // TODO: tm_read(shared_t, tx_t, void const*, size_t, void*)
-    return false;
+    struct transaction *t = (struct transaction *)tx;
+    struct region *region = (struct region *)shared;
+
+    struct segment *current = region->segments;
+    while (current != NULL)
+    {
+        uintptr_t segment_start = (uintptr_t)current + sizeof(struct segment);
+        if (source >= segment_start && source < segment_start + current->size)
+        {
+            struct version_lock *lock = &current->locks[(uint64_t)(source - segment_start) / region->align];
+            // Abort transaction if the object was marked for deallocation (alloc_lock == true)
+            // or if the object is currently being writte (write_lock == true)
+            // or if the lock version is greater than the transaction read version (meaning that the object was update in the meantime)
+            if (atomic_load(&current->alloc_lock) || atomic_load(&lock->write_lock) || atomic_load(&lock->version) > t->read_version)
+            {
+                return false;
+            }
+
+            break;
+        }
+    }
+
+    // means there's no segment containing the source address in the shared region
+    if (current == NULL)
+    {
+        return false;
+    }
+
+    map_set(&t->read_set, source, target, size);
+    return true;
 }
 
 /** [thread-safe] Write operation in the given transaction, source in a private region and target in the shared region.
