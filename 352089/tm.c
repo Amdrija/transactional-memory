@@ -280,10 +280,38 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size, void *ta
  * @param target Target start address (in the shared region)
  * @return Whether the whole transaction can continue
  **/
-bool tm_write(shared_t unused(shared), tx_t unused(tx), void const *unused(source), size_t unused(size), void *unused(target))
+bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size, void *target)
 {
-    // TODO: tm_write(shared_t, tx_t, void const*, size_t, void*)
-    return false;
+    struct transaction *t = (struct transaction *)tx;
+    struct region *region = (struct region *)shared;
+
+    struct segment *current = region->segments;
+    while (current != NULL)
+    {
+        uintptr_t segment_start = (uintptr_t)current + sizeof(struct segment);
+        if (source >= segment_start && source < segment_start + current->size)
+        {
+            struct version_lock *lock = &current->locks[(uint64_t)(source - segment_start) / region->align];
+            // Abort transaction if the object was marked for deallocation (alloc_lock == true)
+            // or if the object is currently being writte (write_lock == true)
+            // or if the lock version is greater than the transaction read version (meaning that the object was update in the meantime)
+            if (atomic_load(&current->alloc_lock) || atomic_load(&lock->write_lock) || atomic_load(&lock->version) > t->read_version)
+            {
+                return false;
+            }
+
+            break;
+        }
+    }
+
+    // means there's no segment containing the source address in the shared region
+    if (current == NULL)
+    {
+        return false;
+    }
+
+    map_set(&t->write_set, source, target, size);
+    return true;
 }
 
 /** [thread-safe] Memory allocation in the given transaction.
