@@ -32,7 +32,7 @@
 
 struct version_lock
 {
-    atomic_bool write_lock;
+    atomic_flag write_lock;
     atomic_uint_fast64_t version;
 };
 
@@ -57,6 +57,8 @@ struct map_value
     void *key;
     void *value;
     size_t size;
+    struct segment *segment;
+    struct lock *lock;
 };
 
 struct map
@@ -78,13 +80,16 @@ void map_destroy(struct map *map)
     free(map->pairs);
 }
 
-void *map_get(struct map *map, void *key, size_t *size)
+void *map_get(struct map *map, void *key, size_t *size, struct segment **segment, struct lock **lock)
 {
     for (uint64_t i = 0; i < map->size; i++)
     {
         if (map->pairs[i].key == key)
         {
-            size = map->pairs[i].size;
+            *size = map->pairs[i].size;
+            *segment = map->pairs[i].segment;
+            *lock = map->pairs[i].lock;
+
             return map->pairs[i].value;
         }
     }
@@ -92,7 +97,7 @@ void *map_get(struct map *map, void *key, size_t *size)
     return NULL;
 }
 
-void map_set(struct map *map, void *key, void *value, size_t size)
+void map_set(struct map *map, void *key, void *value, size_t size, struct segment *segment, struct lock *lock)
 {
     if (map->size == map->capacity)
     {
@@ -103,6 +108,9 @@ void map_set(struct map *map, void *key, void *value, size_t size)
     map->pairs[map->size].key = key;
     map->pairs[map->size].value = value;
     map->pairs[map->size].size = size;
+    map->pairs[map->size].segment = segment;
+    map->pairs[map->size].lock = lock;
+
     map->size++;
 }
 
@@ -218,9 +226,74 @@ tx_t tm_begin(shared_t shared, bool is_ro)
  * @param tx     Transaction to end
  * @return Whether the whole transaction committed
  **/
-bool tm_end(shared_t unused(shared), tx_t tx)
+bool tm_end(shared_t shared, tx_t tx)
 {
+    struct region *region = (struct region *)shared;
     struct transaction *t = (struct transaction *)tx;
+
+    // Acquire locks for writing
+    for (uint64_t i = 0; i < t->write_set.size; i++)
+    {
+        void *source = t->read_set.pairs[i].key;
+        struct segment *segment = t->read_set.pairs[i].segment;
+        struct version_lock *lock = t->read_set.pairs[i].lock;
+
+        if (atomic_load(&segment->alloc_lock) || atomic_load(&lock->version) > t->read_version || atomic_flag_test_and_set(&lock->write_lock))
+        {
+            // TODO: Release all write_locks
+            // TODO: Abort transaction by reversing the reads and writes
+            return false;
+        }
+    }
+
+    // Execute reads
+    for (uint64_t i = 0; i < t->read_set.size; i++)
+    {
+        void *source = t->read_set.pairs[i].key;
+        struct segment *segment = t->read_set.pairs[i].segment;
+        struct version_lock *lock = t->read_set.pairs[i].lock;
+
+        if (atomic_load(&segment->alloc_lock) || atomic_load(&lock->version) > t->read_version)
+        {
+            // TODO: Release all write_locks
+            // TODO: Abort transaction by reversing the reads and writes
+            return false;
+        }
+
+        size_t size;
+        void *write_value = map_get(&t->write_set, source, &size, &segment, &lock);
+        if (write_value == NULL)
+        {
+            if (atomic_flag_test_and_set(&lock->write_lock))
+            {
+                // TODO: Release all write_locks
+                // TODO: Abort transaction by reversing the reads and writes
+                return false;
+            }
+            size = t->read_set.pairs[i].size;
+            write_value = source;
+        }
+
+        memcpy(t->read_set.pairs[i].value, write_value, size);
+    }
+
+    // Execute writes
+    for (uint64_t i = 0; i < t->write_set.size; i++)
+    {
+        void *source = t->read_set.pairs[i].key;
+        struct segment *segment = t->read_set.pairs[i].segment;
+        struct version_lock *lock = t->read_set.pairs[i].lock;
+
+        if (atomic_load(&segment->alloc_lock) || atomic_flag_test_and_set(&lock->write_lock) || atomic_load(&lock->version) > t->read_version)
+        {
+            // TODO: Release all write_locks
+            // TODO: Abort transaction by reversing the reads and writes
+            return false;
+        }
+
+        memcpy(t->write_set.pairs[i].key, t->write_set.pairs[i].value, t->write_set.pairs[i].size);
+    }
+
     // TODO: tm_end(shared_t, tx_t)
     // Implement execution of transaction
     map_destroy(&t->read_set);
@@ -240,8 +313,8 @@ bool tm_end(shared_t unused(shared), tx_t tx)
  **/
 bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size, void *target)
 {
-    struct transaction *t = (struct transaction *)tx;
     struct region *region = (struct region *)shared;
+    struct transaction *t = (struct transaction *)tx;
 
     struct segment *current = region->segments;
     while (current != NULL)
@@ -253,23 +326,18 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size, void *ta
             // Abort transaction if the object was marked for deallocation (alloc_lock == true)
             // or if the object is currently being writte (write_lock == true)
             // or if the lock version is greater than the transaction read version (meaning that the object was update in the meantime)
-            if (atomic_load(&current->alloc_lock) || atomic_load(&lock->write_lock) || atomic_load(&lock->version) > t->read_version)
+            if (atomic_load(&current->alloc_lock) || atomic_flag_test_and_set(&lock->write_lock) || atomic_load(&lock->version) > t->read_version)
             {
+                // TODO: Release all write_locks
                 return false;
             }
 
+            map_set(&t->read_set, source, target, size, current, lock);
             break;
         }
     }
 
-    // means there's no segment containing the source address in the shared region
-    if (current == NULL)
-    {
-        return false;
-    }
-
-    map_set(&t->read_set, source, target, size);
-    return true;
+    return current != NULL;
 }
 
 /** [thread-safe] Write operation in the given transaction, source in a private region and target in the shared region.
@@ -280,10 +348,10 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size, void *ta
  * @param target Target start address (in the shared region)
  * @return Whether the whole transaction can continue
  **/
-bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size, void *target)
+bool tm_write(shared_t unused(shared), tx_t tx, void const *source, size_t size, void *target)
 {
-    struct transaction *t = (struct transaction *)tx;
     struct region *region = (struct region *)shared;
+    struct transaction *t = (struct transaction *)tx;
 
     struct segment *current = region->segments;
     while (current != NULL)
@@ -295,23 +363,18 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size, void *t
             // Abort transaction if the object was marked for deallocation (alloc_lock == true)
             // or if the object is currently being writte (write_lock == true)
             // or if the lock version is greater than the transaction read version (meaning that the object was update in the meantime)
-            if (atomic_load(&current->alloc_lock) || atomic_load(&lock->write_lock) || atomic_load(&lock->version) > t->read_version)
+            if (atomic_load(&current->alloc_lock) || atomic_load(&lock->version) > t->read_version || atomic_flag_test_and_set(&lock->write_lock))
             {
+                // TODO: Release all write_locks
                 return false;
             }
 
+            map_set(&t->write_set, target, source, size, current, lock);
             break;
         }
     }
 
-    // means there's no segment containing the source address in the shared region
-    if (current == NULL)
-    {
-        return false;
-    }
-
-    map_set(&t->write_set, source, target, size);
-    return true;
+    return current != NULL;
 }
 
 /** [thread-safe] Memory allocation in the given transaction.
