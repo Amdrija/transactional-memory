@@ -360,7 +360,7 @@ int main(int argc, char **argv) {
         // auto const nbrepeats = 1;
         auto const seed = static_cast<Seed>(::std::stoul(argv[1]));
         auto const clk_res = Chrono::get_resolution();
-        auto const slow_factor = 16000ul;
+        auto const slow_factor = 16ul;
         // Print run parameters
         ::std::cout << "⎧ #worker threads:     " << nbworkers << ::std::endl;
         ::std::cout << "⎪ #TX per worker:      " << nbtxperwrk << ::std::endl;
