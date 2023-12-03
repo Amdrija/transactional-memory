@@ -338,30 +338,29 @@ int main(int argc, char **argv) {
             return 1;
         }
         // Get/set/compute run parameters
-        // auto const nbworkers = []() {
-        //     auto res = ::std::thread::hardware_concurrency();
-        //     if (unlikely(res == 0))
-        //         res = 16;
-        //     return static_cast<size_t>(res);
-        // }();
-        auto const nbworkers = 16;
-        // auto const nbtxperwrk = 200000ul / nbworkers;
-        auto const nbtxperwrk = 2;
-        // auto const nbtxperwrk = 1ul;
-        auto const nbaccounts = 32;
-        // auto const nbaccounts = 32 * nbworkers;
-        // auto const expnbaccounts = 256 * nbworkers;
-        auto const expnbaccounts = 2;
+        auto const nbworkers = []() {
+            auto res = ::std::thread::hardware_concurrency();
+            if (unlikely(res == 0))
+                res = 16;
+            return static_cast<size_t>(res);
+        }();
+        // auto const nbworkers = 2;
+        auto const nbtxperwrk = 200000ul / nbworkers;
+        // auto const nbtxperwrk = 2;
+        // auto const nbaccounts = 16;
+        auto const nbaccounts = 32 * nbworkers;
+        auto const expnbaccounts = 256 * nbworkers;
+        // auto const expnbaccounts = 32;
         auto const init_balance = 100ul;
         // auto const prob_long = 0.5f;
         auto const prob_long = 0.5f;
         // auto const prob_alloc = 0.01f;
         auto const prob_alloc = 0.0f;
-        // auto const nbrepeats = 7;
-        auto const nbrepeats = 1;
+        auto const nbrepeats = 7;
+        // auto const nbrepeats = 1;
         auto const seed = static_cast<Seed>(::std::stoul(argv[1]));
         auto const clk_res = Chrono::get_resolution();
-        auto const slow_factor = 1600ul;
+        auto const slow_factor = 16000ul;
         // Print run parameters
         ::std::cout << "⎧ #worker threads:     " << nbworkers << ::std::endl;
         ::std::cout << "⎪ #TX per worker:      " << nbtxperwrk << ::std::endl;

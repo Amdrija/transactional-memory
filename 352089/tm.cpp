@@ -82,7 +82,8 @@ struct Region {
     }
 
     ~Region() {
-        printf("%lu: Deleting region\n", pthread_self());
+        // printf("%lu: Deleting region\n", pthread_self());
+
         while (segments != NULL) {
             Segment *next = segments->next;
             free(segments->locks);
@@ -103,11 +104,13 @@ struct Read {
         : source_shared(source_shared), target_private(target_private),
           size(size), lock(lock) {
         // TODO: Check if we have to reverse the read
-        printf("%lu: Reading from %p to %p value: %lu\n", pthread_self(),
-               source_shared, target_private, *(uint64_t *)source_shared);
+        // printf("%lu: Reading from %p to %p value: %lu\n", pthread_self(),
+        //        source_shared, target_private, *(uint64_t *)source_shared);
+
         std::memcpy(target_private, source_shared, size);
-        printf("%lu: Read from %p to %p value: %lu\n", pthread_self(),
-               source_shared, target_private, *(uint64_t *)target_private);
+
+        // printf("%lu: Read from %p to %p value: %lu\n", pthread_self(),
+        //        source_shared, target_private, *(uint64_t *)target_private);
     }
 };
 
@@ -123,40 +126,50 @@ struct Write {
           lock(lock) {
         // Here we have to remember the value, because the source is only going
         // to be visible during the call to write
-        printf("%lu: Writting from %p to %p value: %lu\n", pthread_self(),
-               source_private, target_shared, *(uint64_t *)source_private);
+        // printf("%lu: Writting from %p to %p value: %lu\n", pthread_self(),
+        //        source_private, target_shared, *(uint64_t *)source_private);
+
         std::memcpy(value, source_private, size);
-        printf("%lu: Written from %p to %p value: %lu (address: %p)\n",
-               pthread_self(), source_private, target_shared,
-               *(uint64_t *)value, value);
+
+        // printf("%lu: Written from %p to %p value: %lu (address: %p)\n",
+        //        pthread_self(), source_private, target_shared,
+        //        *(uint64_t *)value, value);
     }
 
     void overwrite(void const *source_private, size_t size) {
-        printf("%lu: Overwritting from %p to %p value: %lu\n", pthread_self(),
-               source_private, target_shared, *(uint64_t *)source_private);
+        // printf("%lu: Overwritting from %p to %p value: %lu\n",
+        // pthread_self(),
+        //        source_private, target_shared, *(uint64_t *)source_private);
+
         delete[] value;
         value = new uint8_t[size];
 
         std::memcpy(value, source_private, size);
-        printf("%lu: Overwritten from %p to %p value: %lu (address: %p)\n",
-               pthread_self(), source_private, target_shared,
-               *(uint64_t *)value, value);
+
+        // printf("%lu: Overwritten from %p to %p value: %lu (address: %p)\n",
+        //        pthread_self(), source_private, target_shared,
+        //        *(uint64_t *)value, value);
     }
 
     void execute(uint64_t version) {
-        printf("%lu: Executing write from %p to %p value: %lu\n",
-               pthread_self(), value, target_shared, *(uint64_t *)value);
+        // printf("%lu: Executing write from %p to %p value: %lu\n",
+        //        pthread_self(), value, target_shared, *(uint64_t *)value);
+
         this->lock->version.store(version);
         std::memcpy(target_shared, value, size);
-        printf("%lu: Executed write from %p to %p value: %lu\n", pthread_self(),
-               value, target_shared, *(uint64_t *)value);
+
+        // printf("%lu: Executed write from %p to %p value: %lu\n",
+        // pthread_self(),
+        //        value, target_shared, *(uint64_t *)value);
     }
 
     ~Write() {
-        printf("Deleting %p\n", this->target_shared);
+        // printf("Deleting %p\n", this->target_shared);
         // If i include this delte I get double free?
+
         delete[] value;
-        printf("Deleted %p\n", this->target_shared);
+
+        // printf("Deleted %p\n", this->target_shared);
     }
 };
 
@@ -202,7 +215,8 @@ struct Transaction {
  **/
 shared_t tm_create(size_t size, size_t align) noexcept {
     Region *region = Region::create(size, align);
-    printf("%lu: Created region\n", pthread_self());
+
+    // printf("%lu: Created region\n", pthread_self());
 
     return region == NULL ? invalid_shared : (shared_t)region;
 }
@@ -213,7 +227,8 @@ shared_t tm_create(size_t size, size_t align) noexcept {
 void tm_destroy(shared_t shared) noexcept {
     auto region = (Region *)shared;
     delete region;
-    printf("%lu: Deleted region\n", pthread_self());
+
+    // printf("%lu: Deleted region\n", pthread_self());
 }
 
 /** [thread-safe] Return the start address of the first allocated segment in the
@@ -226,8 +241,8 @@ void *tm_start(shared_t shared) noexcept {
     auto start_address =
         (void *)((uintptr_t)region->segments + sizeof(Segment));
 
-    printf("%lu: Started transaction: %p, %p\n", pthread_self(),
-           region->segments, start_address);
+    // printf("%lu: Started transaction: %p, %p\n", pthread_self(),
+    //        region->segments, start_address);
 
     return start_address;
 }
@@ -264,7 +279,8 @@ tx_t tm_begin(shared_t shared, bool is_ro) noexcept {
     Transaction *transaction =
         new Transaction(region->global_version.load(), is_ro);
 
-    printf("%lu: Began transaction\n", pthread_self());
+    // printf("%lu: Began transaction\n", pthread_self());
+
     return (tx_t)transaction;
 }
 
@@ -274,7 +290,8 @@ tx_t tm_begin(shared_t shared, bool is_ro) noexcept {
  * @return Whether the whole transaction committed
  **/
 bool tm_end(shared_t shared, tx_t tx) noexcept {
-    printf("%lu: Ending transaction\n", pthread_self());
+    // printf("%lu: Ending transaction\n", pthread_self());
+
     auto region = (Region *)shared;
     auto transaction = (Transaction *)tx;
 
@@ -285,13 +302,16 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
     }
 
     // Acquire locks for each value in the write set
-    printf("%lu: Write Set: %lu\n", pthread_self(),
-           transaction->write_set.size());
+    // printf("%lu: Write Set: %lu\n", pthread_self(),
+    //        transaction->write_set.size());
+
     for (auto i = transaction->write_set.cbegin();
          i != transaction->write_set.cend(); i++) {
-        printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
-               i->second.get()->target_shared,
-               i->second.get()->lock->write_lock.load());
+
+        // printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
+        //        i->second.get()->target_shared,
+        //        i->second.get()->lock->write_lock.load());
+
         VersionLock *lock = i->second.get()->lock;
         if (lock->write_lock.exchange(true)) {
             // TODO: Abort transaction
@@ -299,16 +319,18 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
 
             return false;
         }
-        printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
-               i->second.get()->target_shared,
-               i->second.get()->lock->write_lock.load());
+
+        // printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
+        //        i->second.get()->target_shared,
+        //        i->second.get()->lock->write_lock.load());
     }
-    printf("%lu: Acquired locks\n", pthread_self());
+
+    // printf("%lu: Acquired locks\n", pthread_self());
 
     uint64_t write_version = region->global_version.fetch_add(1) + 1;
 
-    printf("%lu: Incremented global version %lu\n", pthread_self(),
-           write_version);
+    // printf("%lu: Incremented global version %lu\n", pthread_self(),
+    //        write_version);
 
     if (transaction->read_version + 1 != write_version) {
         for (auto &read : transaction->read_set) {
@@ -324,17 +346,19 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
             }
         }
     }
-    printf("%lu: Validated reads\n", pthread_self());
+
+    // printf("%lu: Validated reads\n", pthread_self());
 
     for (auto &[_, write] : transaction->write_set) {
         write->execute(write_version);
     }
 
-    printf("%lu: Executed writes\n", pthread_self());
+    // printf("%lu: Executed writes\n", pthread_self());
 
     Transaction::finish(transaction);
 
-    printf("%lu: Ended transaction\n", pthread_self());
+    // printf("%lu: Ended transaction\n", pthread_self());
+
     return true;
 }
 
@@ -350,7 +374,8 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
  **/
 bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
              void *target) noexcept {
-    printf("%lu: Adding read\n", pthread_self());
+    // printf("%lu: Adding read\n", pthread_self());
+
     auto region = (Region *)shared;
     auto transaction = (Transaction *)tx;
     uintptr_t source_int = (uintptr_t)source;
@@ -387,8 +412,9 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
                     return false;
                 }
             } else {
-                printf("%lu: Found value %p %p\n", pthread_self(),
-                       write->second->target_shared, write->second->value);
+                // printf("%lu: Found value %p %p\n", pthread_self(),
+                //        write->second->target_shared, write->second->value);
+
                 transaction->read_set.push_back(std::make_unique<Read>(
                     write->second->value, target, size, lock));
             }
@@ -397,7 +423,9 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
         }
         current = current->next;
     }
-    printf("%lu: Added read\n", pthread_self());
+
+    // printf("%lu: Added read\n", pthread_self());
+
     return current != NULL;
 }
 
@@ -413,7 +441,8 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
  **/
 bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
               void *target) noexcept {
-    printf("%lu: Adding write\n", pthread_self());
+    // printf("%lu: Adding write\n", pthread_self());
+
     auto region = (Region *)shared;
     auto transaction = (Transaction *)tx;
     uintptr_t target_int = (uintptr_t)target;
@@ -439,7 +468,8 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
         current = current->next;
     }
 
-    printf("%lu: Added write: %d\n", pthread_self(), current != NULL);
+    // printf("%lu: Added write: %d\n", pthread_self(), current != NULL);
+
     return current != NULL;
 }
 
