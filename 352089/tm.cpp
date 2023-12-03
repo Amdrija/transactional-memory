@@ -37,7 +37,7 @@
 
 struct VersionLock {
     std::atomic<bool> write_lock;
-    std::atomic<uint64_t> version;
+    uint64_t version;
 };
 
 struct Segment {
@@ -155,7 +155,7 @@ struct Write {
         // printf("%lu: Executing write from %p to %p value: %lu\n",
         //        pthread_self(), value, target_shared, *(uint64_t *)value);
 
-        this->lock->version.store(version);
+        this->lock->version = version;
         std::memcpy(target_shared, value, size);
 
         // printf("%lu: Executed write from %p to %p value: %lu\n",
@@ -338,7 +338,7 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
                 (uintptr_t)read.get()->source_shared);
             if ((write_value == transaction->write_set.cend() &&
                  read.get()->lock->write_lock.load()) ||
-                transaction->read_version < read.get()->lock->version.load()) {
+                transaction->read_version < read.get()->lock->version) {
                 // TODO: Abort transaction
                 Transaction::abort(transaction, transaction->write_set.cend());
 
@@ -390,21 +390,21 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
             auto write = transaction->write_set.find(source_int);
             if (write == transaction->write_set.cend()) {
                 if (lock->write_lock.load() ||
-                    transaction->read_version < lock->version.load()) {
+                    transaction->read_version < lock->version) {
                     // TODO: Abort transaction
                     Transaction::abort(transaction,
                                        transaction->write_set.cbegin());
 
                     return false;
                 }
-                uint64_t last_version = lock->version.load();
+                uint64_t last_version = lock->version;
 
                 transaction->read_set.push_back(
                     std::make_unique<Read>(source, target, size, lock));
 
                 if (lock->write_lock.load() ||
-                    transaction->read_version < lock->version.load() ||
-                    last_version != lock->version.load()) {
+                    transaction->read_version < lock->version ||
+                    last_version != lock->version) {
                     // TODO: Abort transaction
                     Transaction::abort(transaction,
                                        transaction->write_set.cbegin());
