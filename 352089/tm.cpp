@@ -143,9 +143,10 @@ struct Write {
                *(uint64_t *)value, value);
     }
 
-    void execute() {
+    void execute(uint64_t version) {
         printf("%lu: Executing write from %p to %p value: %lu\n",
                pthread_self(), value, target_shared, *(uint64_t *)value);
+        this->lock->version.store(version);
         std::memcpy(target_shared, value, size);
         printf("%lu: Executed write from %p to %p value: %lu\n", pthread_self(),
                value, target_shared, *(uint64_t *)value);
@@ -276,16 +277,31 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
     printf("%lu: Ending transaction\n", pthread_self());
     auto region = (Region *)shared;
     auto transaction = (Transaction *)tx;
+
+    if (transaction->is_read_only) {
+        Transaction::finish(transaction);
+
+        return true;
+    }
+
     // Acquire locks for each value in the write set
+    printf("%lu: Write Set: %lu\n", pthread_self(),
+           transaction->write_set.size());
     for (auto i = transaction->write_set.cbegin();
          i != transaction->write_set.cend(); i++) {
-        VersionLock *lock = i->second->lock;
+        printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
+               i->second.get()->target_shared,
+               i->second.get()->lock->write_lock.load());
+        VersionLock *lock = i->second.get()->lock;
         if (lock->write_lock.exchange(true)) {
             // TODO: Abort transaction
             Transaction::abort(transaction, i);
 
             return false;
         }
+        printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
+               i->second.get()->target_shared,
+               i->second.get()->lock->write_lock.load());
     }
     printf("%lu: Acquired locks\n", pthread_self());
 
@@ -298,10 +314,9 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
         for (auto &read : transaction->read_set) {
             auto write_value = transaction->write_set.find(
                 (uintptr_t)read.get()->source_shared);
-            if (write_value == transaction->write_set.cend() &&
-                (read.get()->lock->write_lock.load() ||
-                 transaction->read_version <
-                     read.get()->lock->version.load())) {
+            if ((write_value == transaction->write_set.cend() &&
+                 read.get()->lock->write_lock.load()) ||
+                transaction->read_version < read.get()->lock->version.load()) {
                 // TODO: Abort transaction
                 Transaction::abort(transaction, transaction->write_set.cend());
 
@@ -312,7 +327,7 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
     printf("%lu: Validated reads\n", pthread_self());
 
     for (auto &[_, write] : transaction->write_set) {
-        write->execute();
+        write->execute(write_version);
     }
 
     printf("%lu: Executed writes\n", pthread_self());
@@ -349,7 +364,8 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
                 &current->locks[(source_int - segment_start) / region->align];
             auto write = transaction->write_set.find(source_int);
             if (write == transaction->write_set.cend()) {
-                if (lock->write_lock.load()) {
+                if (lock->write_lock.load() ||
+                    transaction->read_version < lock->version.load()) {
                     // TODO: Abort transaction
                     Transaction::abort(transaction,
                                        transaction->write_set.cbegin());
@@ -361,7 +377,9 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
                 transaction->read_set.push_back(
                     std::make_unique<Read>(source, target, size, lock));
 
-                if (last_version != lock->version.load()) {
+                if (lock->write_lock.load() ||
+                    transaction->read_version < lock->version.load() ||
+                    last_version != lock->version.load()) {
                     // TODO: Abort transaction
                     Transaction::abort(transaction,
                                        transaction->write_set.cbegin());
