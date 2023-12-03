@@ -103,7 +103,6 @@ struct Read {
          VersionLock *lock)
         : source_shared(source_shared), target_private(target_private),
           size(size), lock(lock) {
-        // TODO: Check if we have to reverse the read
         // printf("%lu: Reading from %p to %p value: %lu\n", pthread_self(),
         //        source_shared, target_private, *(uint64_t *)source_shared);
 
@@ -309,10 +308,10 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
          i != transaction->write_set.cend(); i++) {
 
         // printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
-        //        i->second.get()->target_shared,
-        //        i->second.get()->lock->write_lock.load());
+        //        i->second->target_shared,
+        //        i->second->lock->write_lock.load());
 
-        VersionLock *lock = i->second.get()->lock;
+        VersionLock *lock = i->second->lock;
         if (lock->write_lock.exchange(true)) {
             // TODO: Abort transaction
             Transaction::abort(transaction, i);
@@ -321,8 +320,8 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
         }
 
         // printf("%lu: Acquiring lock: %p Lock: %d\n", pthread_self(),
-        //        i->second.get()->target_shared,
-        //        i->second.get()->lock->write_lock.load());
+        //        i->second->target_shared,
+        //        i->second->lock->write_lock.load());
     }
 
     // printf("%lu: Acquired locks\n", pthread_self());
@@ -334,11 +333,11 @@ bool tm_end(shared_t shared, tx_t tx) noexcept {
 
     if (transaction->read_version + 1 != write_version) {
         for (auto &read : transaction->read_set) {
-            auto write_value = transaction->write_set.find(
-                (uintptr_t)read.get()->source_shared);
+            auto write_value =
+                transaction->write_set.find((uintptr_t)read->source_shared);
             if ((write_value == transaction->write_set.cend() &&
-                 read.get()->lock->write_lock.load()) ||
-                transaction->read_version < read.get()->lock->version) {
+                 read->lock->write_lock.load()) ||
+                transaction->read_version < read->lock->version) {
                 // TODO: Abort transaction
                 Transaction::abort(transaction, transaction->write_set.cend());
 
@@ -385,10 +384,12 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
         uintptr_t segment_start = (uintptr_t)current + sizeof(Segment);
         if (source_int >= segment_start &&
             source_int < segment_start + +current->size) {
-            VersionLock *lock =
-                &current->locks[(source_int - segment_start) / region->align];
+
             auto write = transaction->write_set.find(source_int);
             if (write == transaction->write_set.cend()) {
+                VersionLock *lock =
+                    &current
+                         ->locks[(source_int - segment_start) / region->align];
                 if (lock->write_lock.load() ||
                     transaction->read_version < lock->version) {
                     // TODO: Abort transaction
@@ -416,7 +417,7 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
                 //        write->second->target_shared, write->second->value);
 
                 transaction->read_set.push_back(std::make_unique<Read>(
-                    write->second->value, target, size, lock));
+                    write->second->value, target, size, write->second->lock));
             }
 
             break;
