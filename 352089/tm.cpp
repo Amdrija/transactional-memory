@@ -47,8 +47,13 @@ struct Segment {
     VersionLock *locks;
 };
 
-uintptr_t get_segment_start(Segment *segment) {
+inline uintptr_t get_segment_start(Segment *segment) {
     return (uintptr_t)segment + sizeof(Segment);
+}
+
+inline VersionLock *get_lock(Segment *segment, uintptr_t address,
+                             size_t align) {
+    return &segment->locks[(address - get_segment_start(segment)) / align];
 }
 
 struct Region {
@@ -73,6 +78,7 @@ struct Region {
         region->segments->prev = NULL;
         region->segments->next = NULL;
         region->segments->size = size;
+
         region->segments->locks =
             (VersionLock *)malloc(sizeof(VersionLock) * size / align);
         if (unlikely(!region->segments->locks)) {
@@ -81,6 +87,8 @@ struct Region {
 
             return NULL;
         }
+
+        // printf("%lu: Initialized region\n", pthread_self());
 
         return region;
     }
@@ -391,8 +399,8 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
             auto write = transaction->write_set.find(source_int);
             if (write == transaction->write_set.cend()) {
                 VersionLock *lock =
-                    &current
-                         ->locks[(source_int - segment_start) / region->align];
+                    get_lock(current, source_int, region->align);
+
                 if (lock->write_lock.load() ||
                     transaction->read_version < lock->version) {
                     // TODO: Abort transaction
@@ -456,8 +464,8 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
         uintptr_t segment_start = get_segment_start(current);
         if (target_int >= segment_start &&
             target_int < segment_start + current->size) {
-            VersionLock *lock =
-                &current->locks[(target_int - segment_start) / region->align];
+            VersionLock *lock = get_lock(current, target_int, region->align);
+
             auto write = transaction->write_set.find(target_int);
             if (write == transaction->write_set.cend()) {
                 transaction->write_set.emplace(
