@@ -47,6 +47,10 @@ struct Segment {
     VersionLock *locks;
 };
 
+uintptr_t get_segment_start(Segment *segment) {
+    return (uintptr_t)segment + sizeof(Segment);
+}
+
 struct Region {
     std::atomic<uint64_t> global_version;
     Segment *segments;
@@ -237,8 +241,7 @@ void tm_destroy(shared_t shared) noexcept {
  **/
 void *tm_start(shared_t shared) noexcept {
     auto region = (Region *)shared;
-    auto start_address =
-        (void *)((uintptr_t)region->segments + sizeof(Segment));
+    auto start_address = (void *)get_segment_start(region->segments);
 
     // printf("%lu: Started transaction: %p, %p\n", pthread_self(),
     //        region->segments, start_address);
@@ -381,7 +384,7 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
 
     Segment *current = region->segments;
     while (current != NULL) {
-        uintptr_t segment_start = (uintptr_t)current + sizeof(Segment);
+        uintptr_t segment_start = get_segment_start(current);
         if (source_int >= segment_start &&
             source_int < segment_start + +current->size) {
 
@@ -450,7 +453,7 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
 
     Segment *current = region->segments;
     while (current != NULL) {
-        uintptr_t segment_start = (uintptr_t)current + sizeof(Segment);
+        uintptr_t segment_start = get_segment_start(current);
         if (target_int >= segment_start &&
             target_int < segment_start + current->size) {
             VersionLock *lock =
