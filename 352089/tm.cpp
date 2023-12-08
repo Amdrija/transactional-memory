@@ -564,7 +564,7 @@ Alloc tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
         return Alloc::nomem;
     }
 
-    std::unique_lock<std::mutex> lck(region->alloc_lock);
+    // std::unique_lock<std::mutex> lck(region->alloc_lock);
     new_segment->prev = region->last_segment;
 
     region->last_segment->next = new_segment;
@@ -609,23 +609,26 @@ bool tm_free(shared_t unused(shared), tx_t unused(tx),
     //             lock_j->write_lock.store(false);
     //         }
 
-    //         region->alloc_lock.store(false);
+    //         // region->alloc_lock.store(false);
 
     //         return false;
     //     }
     // }
 
+    // // std::unique_lock<std::mutex> lck(region->alloc_lock);
     // if (segment->next != NULL) {
     //     segment->next->prev = segment->prev;
+    // } else {
+    //     region->last_segment = segment->prev;
     // }
 
     // // here we don't have to check because the first segment will never be
     // // deallocated
     // segment->prev->next = segment->next;
-    // free(segment);
-    // region->alloc_lock.store(false);
+    // // free(segment);
+    // // region->alloc_lock.store(false);
 
-    // printf("%lu: Deallocated segment: %p\n", pthread_self(), target);
+    // // printf("%lu: Deallocated segment: %p\n", pthread_self(), target);
 
     return true;
 }
