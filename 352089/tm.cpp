@@ -35,9 +35,9 @@
 #include <tm.hpp>
 
 #include "macros.h"
+#define SEGMENT_START_MASK 1 << 55
 
 struct VersionLock {
-    uintptr_t segment_start;
     std::atomic<bool> write_lock;
     uint64_t version;
 };
@@ -54,7 +54,11 @@ inline Segment *get_segment_from_start_address(void *address) {
 }
 
 inline uintptr_t get_segment_start(Segment *segment) {
-    return (uintptr_t)segment + sizeof(Segment) + sizeof(VersionLock);
+    return (uintptr_t)segment + sizeof(Segment);
+}
+
+inline uintptr_t get_segment_start_from_address(uintptr_t address) {
+    return *(uintptr_t *)address;
 }
 
 inline VersionLock *get_lock(uintptr_t address) {
@@ -70,18 +74,16 @@ inline VersionLock *get_lock(uintptr_t address) {
 // value of segment start, and then calculate the offset and get
 // the proper location. This traversing upwards will at most be
 // the size of the version lock.
-inline uintptr_t convert_address(uintptr_t address, size_t align) {
-    VersionLock *lock = get_lock(address);
-    printf("%lu: Got lock: %p %p %lu %lu\n", pthread_self(), lock,
-           lock->segment_start, lock->version, lock->write_lock.load());
-    size_t offset =
-        (address - lock->segment_start) / align * (sizeof(VersionLock) + align);
-    printf("%lu: Offset: %lu\n", pthread_self(), offset);
+inline uintptr_t convert_address(uintptr_t address, size_t unused(align)) {
+    // TODO: Update to support alignements less than 8
+    // printf("%lu: Got lock: %p (dec: %lu)\n", pthread_self(), (void *)address,
+    //        address);
 
-    auto result = address + offset + sizeof(VersionLock);
-    printf("%lu: Result: %lu\n", pthread_self(), result);
+    auto result = *((uintptr_t *)address);
+    // printf("%lu: Result: %p (dec: %lu)\n", pthread_self(), (void *)result,
+    //        result);
 
-    return address + offset + sizeof(VersionLock);
+    return result;
 }
 
 struct Region {
@@ -99,9 +101,16 @@ struct Region {
 
         // Not sure what would happen if I have the alignment, but also align
         // the version locks
+        // Here in the "normal address space" we actually allocate
+        // the addresses so that we can store the start of the segment there
+        // Therefore, when we read the value from the address
+        // we can instantly know where the start of the segment is
+        // and appropriately calculate the offsets etc.
+        // The actual values and locks are stored starting from seg_start + size
         size_t version_lock_count = size / align;
-        size_t segment_size =
-            sizeof(Segment) + sizeof(VersionLock) * version_lock_count + size;
+        size_t segment_size = sizeof(Segment) +
+                              sizeof(VersionLock) * version_lock_count +
+                              2 * size;
         if (unlikely(posix_memalign((void **)&region->segments, region->align,
                                     segment_size) != 0)) { // Allocation failed
             delete region;
@@ -115,14 +124,28 @@ struct Region {
         region->segments->next = NULL;
         region->segments->size = size;
 
-        for (size_t i = 0; i < version_lock_count; i++) {
-            VersionLock *lock =
-                (VersionLock *)((uintptr_t)region->segments + sizeof(Segment) +
-                                i * (sizeof(VersionLock) + align));
-            lock->segment_start = get_segment_start(region->segments);
+        // TODO: Currently doesn't support alignment less than 8
+        auto segment_start = get_segment_start(region->segments);
+        for (size_t i = 0; i < size / sizeof(uintptr_t); i++) {
+            auto data_start = segment_start + size +
+                              i * (sizeof(VersionLock) + align) +
+                              sizeof(VersionLock);
+            memcpy((uintptr_t *)(segment_start + i * sizeof(uintptr_t)),
+                   &data_start, sizeof(uintptr_t));
+            // printf("%lu: Written address: %p %p\n", pthread_self(),
+            //        (uintptr_t *)data_start, *(uintptr_t *)(segment_start +
+            //        i));
         }
 
-        printf("%lu: Initialized region\n", pthread_self());
+        for (size_t i = 0; i < version_lock_count; i++) {
+            auto lock_address =
+                segment_start + size + i * (sizeof(VersionLock) + align);
+            VersionLock *lock = (VersionLock *)lock_address;
+            lock->version = 0;
+            lock->write_lock.store(0);
+        }
+
+        // printf("%lu: Initialized region\n", pthread_self());
 
         return region;
     }
@@ -428,9 +451,11 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
         uintptr_t segment_start = get_segment_start(current);
         if (source_int >= segment_start &&
             source_int < segment_start + current->size) {
-            printf("%lu: Converting address: %p\n", pthread_self(), source_int);
+            // printf("%lu: Converting address: %p\n", pthread_self(),
+            //        (void *)source_int);
             source_int = convert_address(source_int, region->align);
-            printf("%lu: Converted address: %p\n", pthread_self(), source_int);
+            // printf("%lu: Converted address: %p\n", pthread_self(),
+            //        (void *)source_int);
 
             auto write = transaction->write_set.find(source_int);
             if (write == transaction->write_set.cend()) {
@@ -500,9 +525,11 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
         uintptr_t segment_start = get_segment_start(current);
         if (target_int >= segment_start &&
             target_int < segment_start + current->size) {
-            printf("%lu: Convert address: %p\n", pthread_self(), target_int);
+            // printf("%lu: Convert address: %p\n", pthread_self(),
+            //        (void *)target_int);
             target_int = convert_address(target_int, region->align);
-            printf("%lu: Convert address: %p\n\n", pthread_self(), target_int);
+            // printf("%lu: Convert address: %p\n\n", pthread_self(),
+            //        (void *)target_int);
             VersionLock *lock = get_lock(target_int);
 
             auto write = transaction->write_set.find(target_int);
