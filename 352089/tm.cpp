@@ -49,8 +49,7 @@ struct Segment {
 };
 
 inline Segment *get_segment_from_start_address(void *address) {
-    return (Segment *)((uintptr_t)address - sizeof(Segment) -
-                       sizeof(VersionLock));
+    return (Segment *)((uintptr_t)address - sizeof(Segment));
 }
 
 inline uintptr_t get_segment_start(Segment *segment) {
@@ -86,12 +85,61 @@ inline uintptr_t convert_address(uintptr_t address, size_t unused(align)) {
     return result;
 }
 
+bool allocate_segment(Segment **segment, size_t size, size_t align) {
+    // Not sure what would happen if I have the alignment, but also align
+    // the version locks
+    // Here in the "normal address space" we actually allocate
+    // the addresses so that we can store the start of the segment there
+    // Therefore, when we read the value from the address
+    // we can instantly know where the start of the segment is
+    // and appropriately calculate the offsets etc.
+    // The actual values and locks are stored starting from seg_start + size
+    size_t version_lock_count = size / align;
+    size_t segment_size =
+        sizeof(Segment) + sizeof(VersionLock) * version_lock_count + 2 * size;
+    if (unlikely(posix_memalign((void **)segment, align,
+                                segment_size) != 0)) { // Allocation failed
+        return false;
+    }
+
+    memset(*segment, 0, segment_size);
+    (*segment)->prev = NULL;
+    (*segment)->next = NULL;
+    (*segment)->size = size;
+
+    // TODO: Currently doesn't support alignment less than 8
+    auto segment_start = get_segment_start(*segment);
+
+    for (size_t i = 0; i < size / sizeof(uintptr_t); i++) {
+        auto data_start = segment_start + size +
+                          i * (sizeof(VersionLock) + align) +
+                          sizeof(VersionLock);
+        memcpy((uintptr_t *)(segment_start + i * sizeof(uintptr_t)),
+               &data_start, sizeof(uintptr_t));
+        // printf("%lu: Written address: %p %p\n", pthread_self(),
+        //        (uintptr_t *)data_start,
+        //        *(uintptr_t *)(segment_start + i * sizeof(uintptr_t)));
+    }
+
+    for (size_t i = 0; i < version_lock_count; i++) {
+        auto lock_address =
+            segment_start + size + i * (sizeof(VersionLock) + align);
+        VersionLock *lock = (VersionLock *)lock_address;
+        lock->version = 0;
+        lock->write_lock.store(0);
+    }
+
+    // printf("%lu: Initialized region\n", pthread_self());
+
+    return true;
+}
+
 struct Region {
     std::atomic<uint64_t> global_version;
     Segment *segments;
     Segment *last_segment;
     size_t align;
-    std::mutex alloc_lock;
+    std::atomic<bool> alloc_lock;
 
     static Region *create(size_t size, size_t align) {
         Region *region = new Region();
@@ -99,51 +147,14 @@ struct Region {
         region->align = align;
         region->global_version.store(0);
 
-        // Not sure what would happen if I have the alignment, but also align
-        // the version locks
-        // Here in the "normal address space" we actually allocate
-        // the addresses so that we can store the start of the segment there
-        // Therefore, when we read the value from the address
-        // we can instantly know where the start of the segment is
-        // and appropriately calculate the offsets etc.
-        // The actual values and locks are stored starting from seg_start + size
-        size_t version_lock_count = size / align;
-        size_t segment_size = sizeof(Segment) +
-                              sizeof(VersionLock) * version_lock_count +
-                              2 * size;
-        if (unlikely(posix_memalign((void **)&region->segments, region->align,
-                                    segment_size) != 0)) { // Allocation failed
+        if (unlikely(!allocate_segment(&region->segments, size,
+                                       align))) { // Allocation failed
             delete region;
 
             return NULL;
         }
 
-        memset(region->segments, 0, segment_size);
         region->last_segment = region->segments;
-        region->segments->prev = NULL;
-        region->segments->next = NULL;
-        region->segments->size = size;
-
-        // TODO: Currently doesn't support alignment less than 8
-        auto segment_start = get_segment_start(region->segments);
-        for (size_t i = 0; i < size / sizeof(uintptr_t); i++) {
-            auto data_start = segment_start + size +
-                              i * (sizeof(VersionLock) + align) +
-                              sizeof(VersionLock);
-            memcpy((uintptr_t *)(segment_start + i * sizeof(uintptr_t)),
-                   &data_start, sizeof(uintptr_t));
-            // printf("%lu: Written address: %p %p\n", pthread_self(),
-            //        (uintptr_t *)data_start, *(uintptr_t *)(segment_start +
-            //        i));
-        }
-
-        for (size_t i = 0; i < version_lock_count; i++) {
-            auto lock_address =
-                segment_start + size + i * (sizeof(VersionLock) + align);
-            VersionLock *lock = (VersionLock *)lock_address;
-            lock->version = 0;
-            lock->write_lock.store(0);
-        }
 
         // printf("%lu: Initialized region\n", pthread_self());
 
@@ -153,10 +164,10 @@ struct Region {
     ~Region() {
         // printf("%lu: Deleting region\n", pthread_self());
 
-        while (segments != NULL) {
-            Segment *next = segments->next;
-            free(segments);
-            segments = next;
+        while (this->segments != NULL) {
+            Segment *next = this->segments->next;
+            free(this->segments);
+            this->segments = next;
         }
     }
 };
@@ -449,8 +460,8 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
     // printf("%lu: Converting address: %p\n", pthread_self(),
     //        (void *)source_int);
     source_int = convert_address(source_int, region->align);
-    // printf("%lu: Converted address: %p\n", pthread_self(),
-    //        (void *)source_int);
+    // printf("%lu: Converted address: %p\n", pthread_self(), (void
+    // *)source_int);
 
     auto write = transaction->write_set.find(source_int);
     if (write == transaction->write_set.cend()) {
@@ -510,8 +521,8 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
     // printf("%lu: Convert address: %p\n", pthread_self(),
     //        (void *)target_int);
     target_int = convert_address(target_int, region->align);
-    // printf("%lu: Convert address: %p\n\n", pthread_self(),
-    //        (void *)target_int);
+    // printf("%lu: Convert address: %p\n\n", pthread_self(), (void
+    // *)target_int);
     VersionLock *lock = get_lock(target_int);
 
     auto write = transaction->write_set.find(target_int);
@@ -539,38 +550,33 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
  *(abort_alloc)
  **/
 Alloc tm_alloc(shared_t shared, tx_t tx, size_t size, void **target) noexcept {
-    // auto region = (Region *)shared;
+    auto region = (Region *)shared;
 
-    // if (region->alloc_lock.exchange(true)) {
-    //     return Alloc::abort;
-    // }
+    if (region->alloc_lock.exchange(true)) {
+        return Alloc::abort;
+    }
 
-    // Segment *new_segment;
-    // if (unlikely(posix_memalign((void **)&new_segment, region->align,
-    //                             sizeof(Segment) + size) !=
-    //              0)) { // Allocation failed
-    //     return Alloc::nomem;
-    // }
+    Segment *new_segment;
+    if (unlikely(!allocate_segment(&new_segment, size,
+                                   region->align))) { // Allocation failed
+        return Alloc::nomem;
+    }
 
-    // new_segment->prev = region->last_segment;
-    // new_segment->next = NULL;
-    // new_segment->size = size;
+    new_segment->prev = region->last_segment;
+    new_segment->next = NULL;
+    new_segment->size = size;
 
-    // new_segment->locks =
-    //     (VersionLock *)malloc(sizeof(VersionLock) * size / region->align);
-    // if (unlikely(!new_segment->locks)) {
-    //     free(new_segment);
+    region->last_segment = new_segment;
 
-    //     return Alloc::nomem;
-    // }
+    region->alloc_lock.store(false);
 
-    // region->last_segment = new_segment;
+    memset(new_segment, 0, size);
 
-    // region->alloc_lock.store(false);
+    *target = (void *)get_segment_start(new_segment);
 
-    // memset(new_segment, 0, size);
-
-    // *target = (void *)get_segment_start(new_segment);
+    // printf("%lu: Allocated new segment: %p %p\n", pthread_self(),
+    // new_segment,
+    //        *target);
 
     return Alloc::success;
 }
@@ -583,35 +589,42 @@ Alloc tm_alloc(shared_t shared, tx_t tx, size_t size, void **target) noexcept {
  * @return Whether the whole transaction can continue
  **/
 bool tm_free(shared_t shared, tx_t unused(tx), void *target) noexcept {
-    // auto region = (Region *)shared;
+    auto region = (Region *)shared;
 
-    // if (region->alloc_lock.exchange(true)) {
-    //     return false;
-    // }
+    if (region->alloc_lock.exchange(true)) {
+        return false;
+    }
 
-    // Segment *segment = get_segment_from_start_address(target);
-    // for (size_t i = 0; i < segment->size / region->align; i++) {
-    //     if (segment->locks[i].write_lock.exchange(true)) {
-    //         for (size_t j = 0; j < i; j++) {
-    //             segment->locks[j].write_lock.store(false);
-    //         }
+    Segment *segment = get_segment_from_start_address(target);
+    for (size_t i = 0; i < segment->size; i += region->align) {
+        uintptr_t real_address =
+            convert_address((uintptr_t)target + i, segment->size);
+        VersionLock *lock = get_lock(real_address);
 
-    //         region->alloc_lock.store(false);
+        if (lock->write_lock.exchange(true)) {
+            for (size_t j = 0; j < i; j += region->align) {
+                VersionLock *lock_j = get_lock(
+                    convert_address((uintptr_t)target + j, segment->size));
+                lock_j->write_lock.store(false);
+            }
 
-    //         return false;
-    //     }
-    // }
+            region->alloc_lock.store(false);
 
-    // if (segment->next != NULL) {
-    //     segment->next->prev = segment->prev;
-    // }
+            return false;
+        }
+    }
 
-    // // here we don't have to check because the first segment will never be
-    // // deallocated
-    // segment->prev->next = segment->next;
+    if (segment->next != NULL) {
+        segment->next->prev = segment->prev;
+    }
 
-    // free(segment->locks);
-    // free(segment);
+    // here we don't have to check because the first segment will never be
+    // deallocated
+    segment->prev->next = segment->next;
+    free(segment);
+    region->alloc_lock.store(false);
+
+    // printf("%lu: Deallocated segment: %p\n", pthread_self(), target);
 
     return true;
 }

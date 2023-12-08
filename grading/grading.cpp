@@ -354,8 +354,8 @@ int main(int argc, char **argv) {
         auto const init_balance = 100ul;
         // auto const prob_long = 0.5f;
         auto const prob_long = 0.5f;
-        // auto const prob_alloc = 0.01f;
-        auto const prob_alloc = 0.0f;
+        auto const prob_alloc = 0.01f;
+        // auto const prob_alloc = 0.0f;
         auto const nbrepeats = 7;
         // auto const nbrepeats = 1;
         auto const seed = static_cast<Seed>(::std::stoul(argv[1]));
