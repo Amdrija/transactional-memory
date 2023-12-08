@@ -139,7 +139,7 @@ struct Region {
     Segment *segments;
     Segment *last_segment;
     size_t align;
-    std::atomic<bool> alloc_lock;
+    std::mutex alloc_lock;
 
     static Region *create(size_t size, size_t align) {
         Region *region = new Region();
@@ -549,12 +549,14 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
  * @return Whether the whole transaction can continue (success/nomem), or not
  *(abort_alloc)
  **/
-Alloc tm_alloc(shared_t shared, tx_t tx, size_t size, void **target) noexcept {
+Alloc tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
+               void **target) noexcept {
+    // printf("%lu: Trying to allocate a new segment\n", pthread_self());
     auto region = (Region *)shared;
 
-    if (region->alloc_lock.exchange(true)) {
-        return Alloc::abort;
-    }
+    // if (region->alloc_lock.exchange(true)) {
+    //     return Alloc::abort;
+    // }
 
     Segment *new_segment;
     if (unlikely(!allocate_segment(&new_segment, size,
@@ -562,15 +564,13 @@ Alloc tm_alloc(shared_t shared, tx_t tx, size_t size, void **target) noexcept {
         return Alloc::nomem;
     }
 
+    std::unique_lock<std::mutex> lck(region->alloc_lock);
     new_segment->prev = region->last_segment;
-    new_segment->next = NULL;
-    new_segment->size = size;
 
+    region->last_segment->next = new_segment;
     region->last_segment = new_segment;
 
-    region->alloc_lock.store(false);
-
-    memset(new_segment, 0, size);
+    // region->alloc_lock.store(false);
 
     *target = (void *)get_segment_start(new_segment);
 
@@ -588,41 +588,42 @@ Alloc tm_alloc(shared_t shared, tx_t tx, size_t size, void **target) noexcept {
  *to deallocate
  * @return Whether the whole transaction can continue
  **/
-bool tm_free(shared_t shared, tx_t unused(tx), void *target) noexcept {
-    auto region = (Region *)shared;
+bool tm_free(shared_t unused(shared), tx_t unused(tx),
+             void *unused(target)) noexcept {
+    // auto region = (Region *)shared;
 
-    if (region->alloc_lock.exchange(true)) {
-        return false;
-    }
+    // if (region->alloc_lock.exchange(true)) {
+    //     return false;
+    // }
 
-    Segment *segment = get_segment_from_start_address(target);
-    for (size_t i = 0; i < segment->size; i += region->align) {
-        uintptr_t real_address =
-            convert_address((uintptr_t)target + i, segment->size);
-        VersionLock *lock = get_lock(real_address);
+    // Segment *segment = get_segment_from_start_address(target);
+    // for (size_t i = 0; i < segment->size; i += region->align) {
+    //     uintptr_t real_address =
+    //         convert_address((uintptr_t)target + i, segment->size);
+    //     VersionLock *lock = get_lock(real_address);
 
-        if (lock->write_lock.exchange(true)) {
-            for (size_t j = 0; j < i; j += region->align) {
-                VersionLock *lock_j = get_lock(
-                    convert_address((uintptr_t)target + j, segment->size));
-                lock_j->write_lock.store(false);
-            }
+    //     if (lock->write_lock.exchange(true)) {
+    //         for (size_t j = 0; j < i; j += region->align) {
+    //             VersionLock *lock_j = get_lock(
+    //                 convert_address((uintptr_t)target + j, segment->size));
+    //             lock_j->write_lock.store(false);
+    //         }
 
-            region->alloc_lock.store(false);
+    //         region->alloc_lock.store(false);
 
-            return false;
-        }
-    }
+    //         return false;
+    //     }
+    // }
 
-    if (segment->next != NULL) {
-        segment->next->prev = segment->prev;
-    }
+    // if (segment->next != NULL) {
+    //     segment->next->prev = segment->prev;
+    // }
 
-    // here we don't have to check because the first segment will never be
-    // deallocated
-    segment->prev->next = segment->next;
-    free(segment);
-    region->alloc_lock.store(false);
+    // // here we don't have to check because the first segment will never be
+    // // deallocated
+    // segment->prev->next = segment->next;
+    // free(segment);
+    // region->alloc_lock.store(false);
 
     // printf("%lu: Deallocated segment: %p\n", pthread_self(), target);
 
