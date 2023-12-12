@@ -565,10 +565,12 @@ Alloc tm_alloc(shared_t shared, tx_t unused(tx), size_t size,
     }
 
     // std::unique_lock<std::mutex> lck(region->alloc_lock);
+    region->alloc_lock.lock();
     new_segment->prev = region->last_segment;
 
     region->last_segment->next = new_segment;
     region->last_segment = new_segment;
+    region->alloc_lock.unlock();
 
     // region->alloc_lock.store(false);
 
