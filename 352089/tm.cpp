@@ -39,7 +39,7 @@
 
 struct VersionLock {
     std::atomic<bool> write_lock;
-    uint64_t version;
+    std::atomic<uint64_t> version;
 };
 
 struct Segment {
@@ -455,44 +455,50 @@ bool tm_read(shared_t shared, tx_t tx, void const *source, size_t size,
 
     auto region = (Region *)shared;
     auto transaction = (Transaction *)tx;
-    uintptr_t source_int = (uintptr_t)source;
+    uintptr_t source_start = (uintptr_t)source;
 
-    // printf("%lu: Converting address: %p\n", pthread_self(),
-    //        (void *)source_int);
-    source_int = convert_address(source_int, region->align);
-    // printf("%lu: Converted address: %p\n", pthread_self(), (void
-    // *)source_int);
+    for (uintptr_t address = source_start; address < source_start + size;
+         address += region->align) {
+        // printf("%lu: Converting address: %p\n", pthread_self(),
+        //        (void *)source_int);
+        uintptr_t source_int = convert_address(address, region->align);
+        // printf("%lu: Converted address: %p\n", pthread_self(), (void
+        // *)source_int);
 
-    auto write = transaction->write_set.find(source_int);
-    if (write == transaction->write_set.cend()) {
-        VersionLock *lock = get_lock(source_int);
+        auto write = transaction->write_set.find(source_int);
+        if (write == transaction->write_set.cend()) {
+            VersionLock *lock = get_lock(source_int);
 
-        if (lock->write_lock.load() ||
-            transaction->read_version < lock->version) {
-            // TODO: Abort transaction
-            Transaction::abort(transaction, transaction->write_set.cbegin());
+            if (lock->write_lock.load() ||
+                transaction->read_version < lock->version) {
+                // TODO: Abort transaction
+                Transaction::abort(transaction,
+                                   transaction->write_set.cbegin());
 
-            return false;
+                return false;
+            }
+            uint64_t last_version = lock->version;
+
+            transaction->read_set.push_back(std::make_unique<Read>(
+                (void *)source_int, target, region->align, lock));
+
+            if (lock->write_lock.load() ||
+                transaction->read_version < lock->version ||
+                last_version != lock->version) {
+                // TODO: Abort transaction
+                Transaction::abort(transaction,
+                                   transaction->write_set.cbegin());
+
+                return false;
+            }
+        } else {
+            // printf("%lu: Found value %p %p\n", pthread_self(),
+            //        write->second->target_shared, write->second->value);
+
+            transaction->read_set.push_back(
+                std::make_unique<Read>(write->second->value, target,
+                                       region->align, write->second->lock));
         }
-        uint64_t last_version = lock->version;
-
-        transaction->read_set.push_back(
-            std::make_unique<Read>((void *)source_int, target, size, lock));
-
-        if (lock->write_lock.load() ||
-            transaction->read_version < lock->version ||
-            last_version != lock->version) {
-            // TODO: Abort transaction
-            Transaction::abort(transaction, transaction->write_set.cbegin());
-
-            return false;
-        }
-    } else {
-        // printf("%lu: Found value %p %p\n", pthread_self(),
-        //        write->second->target_shared, write->second->value);
-
-        transaction->read_set.push_back(std::make_unique<Read>(
-            write->second->value, target, size, write->second->lock));
     }
 
     // printf("%lu: Added read\n", pthread_self());
@@ -516,22 +522,25 @@ bool tm_write(shared_t shared, tx_t tx, void const *source, size_t size,
 
     auto region = (Region *)shared;
     auto transaction = (Transaction *)tx;
-    uintptr_t target_int = (uintptr_t)target;
+    uintptr_t target_start = (uintptr_t)target;
 
-    // printf("%lu: Convert address: %p\n", pthread_self(),
-    //        (void *)target_int);
-    target_int = convert_address(target_int, region->align);
-    // printf("%lu: Convert address: %p\n\n", pthread_self(), (void
-    // *)target_int);
-    VersionLock *lock = get_lock(target_int);
+    for (uintptr_t address = target_start; address < target_start + size;
+         address += region->align) {
+        // printf("%lu: Convert address: %p\n", pthread_self(),
+        //        (void *)target_int);
+        uintptr_t target_int = convert_address(address, region->align);
+        // printf("%lu: Convert address: %p\n\n", pthread_self(), (void
+        // *)target_int);
+        VersionLock *lock = get_lock(target_int);
 
-    auto write = transaction->write_set.find(target_int);
-    if (write == transaction->write_set.cend()) {
-        transaction->write_set.emplace(
-            target_int,
-            std::make_unique<Write>(source, (void *)target_int, size, lock));
-    } else {
-        write->second->overwrite(source, size);
+        auto write = transaction->write_set.find(target_int);
+        if (write == transaction->write_set.cend()) {
+            transaction->write_set.emplace(
+                target_int, std::make_unique<Write>(source, (void *)target_int,
+                                                    region->align, lock));
+        } else {
+            write->second->overwrite(source, region->align);
+        }
     }
 
     // printf("%lu: Added write: %d\n", pthread_self(), current != NULL);
