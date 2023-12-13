@@ -74,7 +74,6 @@ inline VersionLock *get_lock(uintptr_t address) {
 // the proper location. This traversing upwards will at most be
 // the size of the version lock.
 inline uintptr_t convert_address(uintptr_t address, size_t unused(align)) {
-    // TODO: Update to support alignements less than 8
     // printf("%lu: Got lock: %p (dec: %lu)\n", pthread_self(), (void *)address,
     //        address);
 
@@ -95,8 +94,10 @@ bool allocate_segment(Segment **segment, size_t size, size_t align) {
     // and appropriately calculate the offsets etc.
     // The actual values and locks are stored starting from seg_start + size
     size_t version_lock_count = size / align;
-    size_t segment_size =
-        sizeof(Segment) + sizeof(VersionLock) * version_lock_count + 2 * size;
+    size_t address_size = align < sizeof(uintptr_t) ? sizeof(uintptr_t) : align;
+    size_t address_part_size = address_size * version_lock_count;
+    size_t segment_size = sizeof(Segment) + address_part_size +
+                          sizeof(VersionLock) * version_lock_count + size;
     if (unlikely(posix_memalign((void **)segment, align,
                                 segment_size) != 0)) { // Allocation failed
         return false;
@@ -107,15 +108,14 @@ bool allocate_segment(Segment **segment, size_t size, size_t align) {
     (*segment)->next = NULL;
     (*segment)->size = size;
 
-    // TODO: Currently doesn't support alignment less than 8
     auto segment_start = get_segment_start(*segment);
 
-    for (size_t i = 0; i < size / sizeof(uintptr_t); i++) {
-        auto data_start = segment_start + size +
+    for (size_t i = 0; i < version_lock_count; i++) {
+        auto data_start = segment_start + address_part_size +
                           i * (sizeof(VersionLock) + align) +
                           sizeof(VersionLock);
-        memcpy((uintptr_t *)(segment_start + i * sizeof(uintptr_t)),
-               &data_start, sizeof(uintptr_t));
+        memcpy((uintptr_t *)(segment_start + i * address_size), &data_start,
+               sizeof(uintptr_t));
         // printf("%lu: Written address: %p %p\n", pthread_self(),
         //        (uintptr_t *)data_start,
         //        *(uintptr_t *)(segment_start + i * sizeof(uintptr_t)));
@@ -218,9 +218,10 @@ struct Write {
         // printf("%lu: Overwritting from %p to %p value: %lu\n",
         // pthread_self(),
         //        source_private, target_shared, *(uint64_t *)source_private);
-
-        delete[] value;
-        value = new uint8_t[size];
+        if (size != this->size) {
+            delete[] value;
+            value = new uint8_t[size];
+        }
 
         std::memcpy(value, source_private, size);
 
